@@ -1,0 +1,8 @@
+{
+  "name": "Nexus Dock",
+  "description": "A beautiful dock for your distro",
+  "uuid": "nexus-dock@luminus.org",
+  "shell-version": [
+    "42"
+  ]
+}
