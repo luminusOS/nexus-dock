@@ -1,39 +1,60 @@
-const { Clutter, GLib, GObject, Meta, Shell, Main, Layout, Dash, AppDisplay } = imports.gi;
+/*
+    Dock from Dash - GNOME Shell 45+ extension
+    Copyright Francois Thirioux 2023
+    GitHub contributors: @fthx, @rastersoft, @underlinejakez, @lucaxvi, @subpop
+    Some ideas picked from GNOME Shell native code
+    Bottom edge code adapted from @jdoda's Hot Edge extension
+    License GPL v3
+*/
 
+
+import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Layout from 'resource:///org/gnome/shell/ui/layout.js'
+import * as Dash from 'resource:///org/gnome/shell/ui/dash.js';
+import * as AppDisplay from 'resource:///org/gnome/shell/ui/appDisplay.js';
+
+
+// Dock settings
 const DASH_MAX_HEIGHT_RATIO = 15; // %
 const AUTO_HIDE_DELAY = 300; // ms
 const SHOWING_ANIMATION_DURATION = 100; // ms
 const HIDING_ANIMATION_DURATION = 200; // ms
 const SHOW_OVERVIEW_AT_STARTUP = false;
 
+// Bottom edge settings
+const HOT_EDGE_PRESSURE_TIMEOUT = 1000; // ms
+const PRESSURE_TRESHOLD = 150;
+
+
 const BottomDock = GObject.registerClass({
     Signals: {'toggle-dash': {}},
 }, class BottomDock extends Clutter.Actor {
-    _init(layoutMgr, monitor, x, y) {
+    _init(layoutManager, monitor, x, y) {
         super._init();
 
         this._monitor = monitor;
         this._x = x;
         this._y = y;
-        this._fallbackTimeout = FALLBACK_TIMEOUT;
-        this._suppressActivationButtonHeld = SUPPRESS_ACTIVATION_WHEN_BUTTON_HELD;
-        this._suppressActivationFullscreen = SUPPRESS_ACTIVATION_WHEN_FULLSCREEN;
-        this._pressureThreshold = PRESSURE_TRESHOLD;
+        this._pressure_threshold = PRESSURE_TRESHOLD;
 
-        this._setupFallbackEdgeIfNeeded(layoutMgr);
-
-        this._pressureBarrier = new Layout.PressureBarrier(this._pressureThreshold,
+        this._pressure_barrier = new Layout.PressureBarrier(this._pressure_threshold,
                                                     HOT_EDGE_PRESSURE_TIMEOUT,
                                                     Shell.ActionMode.NORMAL |
                                                     Shell.ActionMode.OVERVIEW);
-        this._pressureBarrier.connect('trigger', this._toggleDock.bind(this));
+        this._pressure_barrier.connect('trigger', this._toggle_dock.bind(this));
 
-        this.connect('destroy', this._onDestroy.bind(this));
+        this.connect('destroy', this._on_destroy.bind(this));
     }
 
     setBarrierSize(size) {
         if (this._barrier) {
-            this._pressureBarrier.removeBarrier(this._barrier);
+            this._pressure_barrier.removeBarrier(this._barrier);
             this._barrier.destroy();
             this._barrier = null;
         }
@@ -45,175 +66,130 @@ const BottomDock = GObject.registerClass({
                                                 x1: this._x + x_offset, x2: this._x + x_offset + size,
                                                 y1: this._y, y2: this._y,
                                                 directions: Meta.BarrierDirection.NEGATIVE_Y});
-            this._pressureBarrier.addBarrier(this._barrier);
+            this._pressure_barrier.addBarrier(this._barrier);
         }
     }
 
-    _setupFallbackEdgeIfNeeded(layoutMgr) {
-        if (!global.display.supportsExtendedBarriers()) {
-            let size = this._monitor.width;
-            let x_offset = this._monitor.width / 2;
-
-            this.set({
-                name: 'hot-edge',
-                x: this._x + x_offset,
-                y: this._y - 1,
-                width: size,
-                height: 1,
-                reactive: true,
-                _timeoutId: null
-            });
-            layoutMgr.addChrome(this);
-        }
-    }
-
-    _onDestroy() {
+    _on_destroy() {
         this.setBarrierSize(0);
-        this._pressureBarrier.destroy();
-        this._pressureBarrier = null;
-        GLib.Source.remove(this._timeoutId);
-        this._timeoutId = null;
+
+        this._pressure_barrier.destroy();
+        this._pressure_barrier = null;
     }
 
-    _toggleDock() {
-        if (this._suppressActivationButtonHeld && (global.get_pointer()[2] & Clutter.ModifierType.BUTTON1_MASK)) {
-            return;
-        }
-
-        if (this._suppressActivationFullscreen && this._monitor.inFullscreen && !Main.overview.visible) {
-            return;
-        }
-
+    _toggle_dock() {
         if (Main.overview.shouldToggleByCornerOrButton()) {
             this.emit('toggle-dash');
         }
     }
-
-    vfuncEnterEvent(crossingEvent) {
-        if (!this._timeoutId) {
-            this._timeoutId = GLib.timeoutAdd(GLib.PRIORITY_HIGH, this._fallbackTimeout, () => {
-                this._toggleDock();
-                return GLib.SOURCE_REMOVE;
-            });
-        }
-        return Clutter.EVENT_PROPAGATE;
-    }
-
-    vfuncLeaveEvent(crossingEvent) {
-        if (this._timeoutId) {
-            GLib.Source.remove(this._timeoutId);
-            this._timeoutId = null;
-        }
-        return Clutter.EVENT_PROPAGATE;
-    }
 });
 
-const Dock = GObject.registerClass(class Dock extends Dash.Dash {
+const Dock = GObject.registerClass(
+class Dock extends Dash.Dash {
     _init() {
         super._init();
+
         Main.layoutManager.addTopChrome(this);
-        this.showAppsButton.setToggleMode(false);
-        this._dashContainer.setTrackHover(true);
-        this._dashContainer.setReactive(true);
+
+        this.showAppsButton.set_toggle_mode(false);
+        this._dashContainer.set_track_hover(true);
+        this._dashContainer.set_reactive(true);
         this.show();
-        this._dockAnimated = false;
-        this._keepDockShown = false;
+
+        this._dock_animated = false;
+        this._keep_dock_shown = false;
+        this._dragging;
     }
 
     _itemMenuStateChanged(item, opened) {
         if (opened) {
             if (this._showLabelTimeoutId > 0) {
-                GLib.sourceRemove(this._showLabelTimeoutId);
+                GLib.source_remove(this._showLabelTimeoutId);
                 this._showLabelTimeoutId = 0;
             }
             item.hideLabel();
 
-            this._lastAppIconWithMenu = item;
-            this._keepDockShown = true;
+            this._last_appicon_with_menu = item;
+            this._keep_dock_shown = true;
         } else {
-            if (item == this._lastAppIconWithMenu) {
-                this._lastAppIconWithMenu = null;
-                this._keepDockShown = false
+            if (item == this._last_appicon_with_menu) {
+                this._last_appicon_with_menu = null;
+                this._keep_dock_shown = false
             }
         }
 
-        this._onDockHover();
+        this._on_dock_hover();
     }
 
-    _onDockScroll(origin, event) {
-        this._activeWorkspace = global.workspace_manager.getActiveWorkspace();
-        switch(event.getScrollDirection()) {
+    _queueRedisplay() {
+    }
+
+    _on_dock_scroll(origin, event) {
+        this._active_workspace = global.workspace_manager.get_active_workspace();
+        switch(event.get_scroll_direction()) {
             case Clutter.ScrollDirection.DOWN:
             case Clutter.ScrollDirection.RIGHT:
-                this._activeWorkspace.getNeighbor(Meta.MotionDirection.RIGHT).activate(event.getTime());
+                this._active_workspace.get_neighbor(Meta.MotionDirection.RIGHT).activate(event.get_time());
                 break;
             case Clutter.ScrollDirection.UP:
             case Clutter.ScrollDirection.LEFT:
-                this._activeWorkspace.getNeighbor(Meta.MotionDirection.LEFT).activate(event.getTime());
+                this._active_workspace.get_neighbor(Meta.MotionDirection.LEFT).activate(event.get_time());
                 break;
         }
     }
 
-    _onDockHover() {
-        if (!this._dashContainer.getHover() && !this._keepDockShown) {
-            this._autoHideDockTimeout = GLib.timeoutAdd(GLib.PRIORITY_DEFAULT, AUTO_HIDE_DELAY, () => {
-                if (!this._dashContainer.getHover()) {
-                    this._hideDock();
-                    this._autoHideDockTimeout = 0;
+    _on_dock_hover() {
+        if (!this._dashContainer.get_hover() && !this._keep_dock_shown) {
+            this._auto_hide_dock_timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, AUTO_HIDE_DELAY, () => {
+                if (!this._dashContainer.get_hover()) {
+                    this._hide_dock();
+                    this._auto_hide_dock_timeout = 0;
                 }
             });
         }
     }
 
-    _hideDock() {
-        if (this._dockAnimated) {
+    _hide_dock() {
+        if (this._dock_animated || !this.work_area || this._dragging) {
             return;
         }
 
-        if (!this.workArea) {
-            return;
-        }
-
-        this._dockAnimated = true;
+        this._dock_animated = true;
         this.ease({
             duration: HIDING_ANIMATION_DURATION,
-            y: this.workArea.y + this.workArea.height,
+            y: this.work_area.y + this.work_area.height,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
-                this._dockAnimated = false;
+                this._dock_animated = false;
                 this.hide();
             },
         });
     }
 
-    _showDock() {
-        if (this._dockAnimated) {
-            return;
-        }
-
-        if (!this.workArea) {
+    _show_dock() {
+        if (this._dock_animated || !this.work_area) {
             return;
         }
 
         this.show();
-        this._dockAnimated = true;
+        this._dock_animated = true;
         this.ease({
             duration: SHOWING_ANIMATION_DURATION,
-            y: this.workArea.y + this.workArea.height - this.height,
+            y: this.work_area.y + this.work_area.height - this.height,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
-                this._dockAnimated = false;
+                this._dock_animated = false;
             },
         });
     }
 });
 
-class DockFromDashExtension {
+export default class DockFromDashExtension {
     constructor() {
-        this._edgeHandlerId = null;
+        this._edge_handler_id = null;
     }
 
-    _updateHotEdges() {
+    _update_hot_edges() {
         for (let i = 0; i < Main.layoutManager.monitors.length; i++) {
             let monitor = Main.layoutManager.monitors[i];
             let leftX = monitor.x;
@@ -236,7 +212,7 @@ class DockFromDashExtension {
 
             if (haveBottom) {
                 let edge = new BottomDock(Main.layoutManager, monitor, leftX, bottomY);
-                edge.connect('toggle-dash', this._toggleDock.bind(this));
+                edge.connect('toggle-dash', this._toggle_dock.bind(this));
                 edge.setBarrierSize(size);
                 Main.layoutManager.hotCorners.push(edge);
             } else {
@@ -245,8 +221,8 @@ class DockFromDashExtension {
         }
     }
 
-    _modifyNativeClickBehavior() {
-        this.originalClickFunction = AppDisplay.AppIcon.prototype.activate;
+    _modify_native_click_behavior() {
+        this.original_click_function = AppDisplay.AppIcon.prototype.activate;
         AppDisplay.AppIcon.prototype.activate = function(button) {
             let event = Clutter.get_current_event();
             let modifiers = event ? event.get_state() : 0;
@@ -260,40 +236,40 @@ class DockFromDashExtension {
                 this.app.open_new_window(-1);
                 Main.overview.hide();
             } else {
-                let appWindows = this.app
+                let app_windows = this.app
                     .get_windows()
-                    .filter(window => !window.is_override_redirect() && !window.is_attached_dialog())
+                    .filter(window => !window.is_override_redirect() && !window.is_attached_dialog() && window.located_on_workspace(global.workspace_manager.get_active_workspace()))
                     .sort((w1, w2) => w1.get_id() - w2.get_id());
 
-                switch (appWindows.length) {
+                switch (app_windows.length) {
                     case 0:
                         this.app.activate();
                         Main.overview.hide();
                     break;
                     case 1:
-                        if (appWindows[0].has_focus() && appWindows[0].can_minimize()) {
-                            appWindows[0].minimize();
+                        if (app_windows[0].has_focus() && app_windows[0].can_minimize()) {
+                            app_windows[0].minimize();
                             Main.overview.hide();
                         } else {
-                            if (!appWindows[0].has_focus()) {
-                                appWindows[0].activate(global.get_current_time());
+                            if (!app_windows[0].has_focus()) {
+                                app_windows[0].activate(global.get_current_time());
                                 Main.overview.hide();
                             }
                         }
                     break;
                     default:
-                        let appHasFocus = false;
-                        let appFocusedWindowIndex = 0;
-                        for (let index = 0; index < appWindows.length; index++) {
-                            if (appWindows[index].has_focus()) {
-                                appHasFocus = true;
-                                appFocusedWindowIndex = index;
+                        let app_has_focus = false;
+                        let app_focused_window_index = 0;
+                        for (var index = 0; index < app_windows.length; index++) {
+                            if (app_windows[index].has_focus()) {
+                                app_has_focus = true;
+                                app_focused_window_index = index;
                             }
                         }
 
-                        if (appHasFocus) {
-                            let nextIndex = (appFocusedWindowIndex + 1) % appWindows.length;
-                            this.app.activate_window(appWindows[nextIndex], global.get_current_time());
+                        if (app_has_focus) {
+                            let next_index = (app_focused_window_index + 1) % app_windows.length;
+                            this.app.activate_window(app_windows[next_index], global.get_current_time());
                         } else {
                             this.app.activate();
                         }
@@ -302,74 +278,73 @@ class DockFromDashExtension {
         }
     }
 
-    _dockRefresh() {
-        if (this._dockRefreshing) {
+    _dock_refresh() {
+        if (this._dock_refreshing) {
             return;
         }
-        this._dockRefreshing = true;
+        this._dock_refreshing = true;
 
-        this._dock.workArea = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
-        if (!this._dock.workArea) {
+        this._dock.work_area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
+        if (!this._dock.work_area) {
             return;
         }
 
-        this._dock.maxDockHeight = Math.round(this._dock.workArea.height * DASH_MAX_HEIGHT_RATIO / 100);
-        this._dock.setWidth(this._dock.workArea.width);
-        this._dock.setHeight(Math.min(this._dock.getPreferredHeight(this._dock.workArea.width), this._dock.maxDockHeight));
-        this._dock.setMaxSize(this._dock.width, this._dock.maxDockHeight);
+        this._dock.max_dock_height = Math.round(this._dock.work_area.height * DASH_MAX_HEIGHT_RATIO / 100);
+        this._dock.set_width(this._dock.work_area.width);
+        this._dock.set_height(Math.min(this._dock.get_preferred_height(this._dock.work_area.width), this._dock.max_dock_height));
+        this._dock.setMaxSize(this._dock.width, this._dock.max_dock_height);
 
-        if (this._dock.isVisible()) {
-            this._dock.setPosition(this._dock.workArea.x, this._dock.workArea.y + this._dock.workArea.height - this._dock.height);
+        if (this._dock.is_visible()) {
+            this._dock.set_position(this._dock.work_area.x, this._dock.work_area.y + this._dock.work_area.height - this._dock.height);
         } else {
-            this._dock.setPosition(this._dock.workArea.x, this._dock.workArea.y + this._dock.workArea.height);
+            this._dock.set_position(this._dock.work_area.x, this._dock.work_area.y + this._dock.work_area.height);
         }
 
         this._dock.show();
-        if (!this._dock._dashContainer.getHover()) {
-            this._dock._hideDock();
+        if (!this._dock._dashContainer.get_hover()) {
+            this._dock._hide_dock();
         }
 
-        this._dockRefreshing = false;
+        this._dock_refreshing = false;
     }
 
-    _toggleDock() {
+    _toggle_dock() {
         if (Main.overview.visible) {
             return;
         }
 
-        if (this._dock.isVisible()) {
-            this._dock._hideDock();
+        if (this._dock.is_visible()) {
+            this._dock._hide_dock();
         } else {
-            this._dock._showDock();
+            this._dock._show_dock();
         }
     }
 
-    _onOverviewShown() {
-        this._dock.hide();
-    }
-
-    _createDock() {
+    _create_dock() {
         this._dock = new Dock();
 
-        this._dockRefresh();
+        this._dock_refresh();
 
-        this._dock._dashContainer.connect('notify::hover', this._dock._onDockHover.bind(this._dock));
-        this._dock._dashContainer.connect('scroll-event', this._dock._onDockScroll.bind(this._dock));
-        this._dock.showAppsButton.connect('button-release-event', () => Main.overview.showApps());
+        this._dock._dashContainer.connectObject('notify::hover', this._dock._on_dock_hover.bind(this._dock), this._dock);
+        this._dock._dashContainer.connectObject('scroll-event', this._dock._on_dock_scroll.bind(this._dock), this._dock);
+        this._dock.showAppsButton.connectObject('button-release-event', () => Main.overview.showApps(), this._dock);
 
-        this._overviewShown = Main.overview.connect('shown', this._onOverviewShown.bind(this));
+        this._item_drag_begin = Main.overview.connect('item-drag-begin', () => {this._dock._dragging = true;});
+        this._item_drag_end = Main.overview.connect('item-drag-end', () => {this._dock._dragging = false;});
 
-        this._workareasChanged = global.display.connect_after('workareas-changed', this._dockRefresh.bind(this));
+        this._overview_shown = Main.overview.connect('shown', () => this._dock.hide());
+
+        this._workareas_changed = global.display.connect_after('workareas-changed', this._dock_refresh.bind(this));
     }
 
     enable() {
-        this._modifyNativeClickBehavior();
-        this._createDock();
+        this._modify_native_click_behavior();
+        this._create_dock();
 
-        this._edgeHandlerId = Main.layoutManager.connect('hot-corners-changed', this._updateHotEdges.bind(this));
+        this._edge_handler_id = Main.layoutManager.connect('hot-corners-changed', this._update_hot_edges.bind(this));
         Main.layoutManager._updateHotCorners();
 
-        this.startupComplete = Main.layoutManager.connect('startup-complete', () => {
+        this._startup_complete = Main.layoutManager.connect('startup-complete', () => {
             if (!SHOW_OVERVIEW_AT_STARTUP) {
                 Main.overview.hide();
             }
@@ -377,31 +352,27 @@ class DockFromDashExtension {
     }
 
     disable() {
-        AppDisplay.AppIcon.prototype.activate = this.originalClickFunction;
+        AppDisplay.AppIcon.prototype.activate = this.original_click_function;
 
-        if (this._overviewShown) {
-            Main.overview.disconnect(this._overviewShown);
+        if (this._overview_shown) {
+            Main.overview.disconnect(this._overview_shown);
         }
-        if (this._dock._autoHideDockTimeout) {
-            GLib.sourceRemove(this._dock._autoHideDockTimeout);
-            this._dock._autoHideDockTimeout = 0;
+        if (this._dock._auto_hide_dock_timeout) {
+            GLib.source_remove(this._dock._auto_hide_dock_timeout);
+            this._dock._auto_hide_dock_timeout = 0;
         }
-        if (this._workareasChanged) {
-            global.display.disconnect(this._workareasChanged);
-            this._workareasChanged = null;
+        if (this._workareas_changed) {
+            global.display.disconnect(this._workareas_changed);
+            this._workareas_changed = null;
         }
-        if (this.startupComplete) {
-            Main.layoutManager.disconnect(this.startupComplete);
+        if (this._startup_complete) {
+            Main.layoutManager.disconnect(this._startup_complete);
         }
 
         Main.layoutManager.removeChrome(this._dock);
-        this._dock._box.destroy();
         this._dock.destroy();
 
-        Main.layoutManager.disconnect(this._edgeHandlerId);
+        Main.layoutManager.disconnect(this._edge_handler_id);
         Main.layoutManager._updateHotCorners();
     }
 }
-
-const dockFromDashExtension = new DockFromDashExtension();
-dockFromDashExtension.enable();
